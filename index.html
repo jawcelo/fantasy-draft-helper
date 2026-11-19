@@ -37,6 +37,7 @@
       <span class="sb-team" id="sbNext">#2</span>
     </div>
     <div class="sb-actions" id="sbActions">
+      <button class="btn btn-bulb" id="simBtn" title="Los rivales eligen solos hasta que te toque">Simular rivales</button>
       <button class="btn btn-ghost-dark" id="undoBtn" title="Deshacer (Ctrl+Z)">Deshacer</button>
       <button class="btn btn-ghost-dark" id="resetBtn">Reiniciar</button>
     </div>
@@ -73,11 +74,13 @@
           <table class="players">
             <thead>
               <tr id="playersHead">
+                <th class="c-star"><span class="sr-only">En tu lista</span></th>
                 <th class="c-rank">ADP</th>
                 <th>Jugador</th>
                 <th>Pos</th>
                 <th class="c-num">Bye</th>
                 <th>Tier</th>
+                <th class="c-avail" title="Probabilidad de que siga disponible en tu siguiente pick">¿Llega a tu pick?</th>
                 <th class="c-action"><span class="sr-only">Acción</span></th>
               </tr>
             </thead>
@@ -94,14 +97,23 @@
 
     <aside class="side">
       <section class="card">
-        <h2 class="card-title">Tu roster</h2>
+        <h2 class="card-title">Para tu pick</h2>
+        <div id="warnBox"></div>
+        <ol class="sugg" id="suggestions"></ol>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Tu roster</h2>
+          <button class="btn btn-small" id="exportBtn" title="Descargar tu roster como CSV">Exportar CSV</button>
+        </div>
         <ol class="roster" id="myRoster"></ol>
       </section>
 
       <section class="card">
-        <h2 class="card-title">Para tu pick</h2>
-        <div id="warnBox"></div>
-        <ol class="sugg" id="suggestions"></ol>
+        <h2 class="card-title">Quedan por tier</h2>
+        <p class="card-note">Si un tier está por acabarse, ese es el momento de ir por la posición.</p>
+        <table class="supply" id="supply"></table>
       </section>
 
       <section class="card">
