@@ -60,7 +60,7 @@ const teamLabel = t => (t === MY_TEAM ? 'Tú' : 'Equipo ' + t);
 const pad = (n, len) => String(n).padStart(len, '0');
 
 /* ---------- Estado ---------- */
-let state = { currentPick: 1, log: [] };
+let state = { currentPick: 1, log: [], watch: [] };
 const ui = { pos: 'ALL', view: 'players' };
 
 function load() {
@@ -89,7 +89,8 @@ function rosterFor(team) {
       const p = PLAYERS[l.playerId];
       const starter = ROSTER_SLOTS.find(s => !s.bench && !slots[s.id] && s.pos.includes(p.pos));
       const target = starter || ROSTER_SLOTS.find(s => s.bench && !slots[s.id]);
-      if (target) slots[target.id] = p;
+      // Si ya no hay lugar, se agrega como extra para que nadie desaparezca
+      slots[target ? target.id : 'EX' + Object.keys(slots).length] = p;
     });
   return slots;
 }
@@ -115,10 +116,107 @@ function undo() {
 }
 
 function resetDraft() {
-  if (!confirm('¿Reiniciar el draft? Se borran todos los picks.')) return;
-  state = { currentPick: 1, log: [] };
+  if (!confirm('¿Reiniciar el draft? Se borran todos los picks (tu lista se conserva).')) return;
+  state = { currentPick: 1, log: [], watch: state.watch };
   save();
   render();
+}
+
+function toggleWatch(id) {
+  const i = state.watch.indexOf(id);
+  if (i >= 0) state.watch.splice(i, 1); else state.watch.push(id);
+  save();
+  renderTable();
+}
+
+/* ---------- Simulación de rivales ----------
+   Cada rival elige entre los mejores disponibles por ADP con algo de
+   azar (como en un draft real) y respetando reglas básicas:
+   nada de K/DST antes de la ronda 13, no un segundo QB o TE temprano,
+   y asegura K y DST si se le acaban las rondas. */
+const PICK_WEIGHTS = [0.42, 0.24, 0.13, 0.09, 0.06, 0.04, 0.02];
+
+function cpuChoice(team) {
+  const drafted = draftedMap();
+  const round = roundOf(state.currentPick);
+  const roundsLeft = ROUNDS - round + 1;
+  const roster = Object.values(rosterFor(team)).filter(Boolean);
+  const has = pos => roster.filter(p => p.pos === pos).length;
+  const mustFill = ['K', 'DST'].filter(pos => has(pos) === 0);
+
+  let pool = PLAYERS.filter(p => !drafted.has(p.id));
+  if (mustFill.length >= roundsLeft) {
+    pool = pool.filter(p => mustFill.includes(p.pos));
+  } else {
+    pool = pool.filter(p => {
+      if ((p.pos === 'K' || p.pos === 'DST') && (round < 13 || has(p.pos) > 0)) return false;
+      if (p.pos === 'QB' && (has('QB') >= 2 || (has('QB') >= 1 && round < 10))) return false;
+      if (p.pos === 'TE' && (has('TE') >= 2 || (has('TE') >= 1 && round < 11))) return false;
+      return true;
+    });
+  }
+  const top = pool.slice(0, PICK_WEIGHTS.length);
+  if (!top.length) return null;
+  let r = Math.random() * PICK_WEIGHTS.slice(0, top.length).reduce((a, b) => a + b, 0);
+  for (let i = 0; i < top.length; i++) {
+    r -= PICK_WEIGHTS[i];
+    if (r <= 0) return top[i];
+  }
+  return top[0];
+}
+
+function simulateToMyTurn() {
+  let n = 0;
+  while (!isOver() && teamOnClock(state.currentPick) !== MY_TEAM) {
+    const team = teamOnClock(state.currentPick);
+    const p = cpuChoice(team);
+    if (!p) break;
+    state.log.push({ pick: state.currentPick, team, playerId: p.id, sim: true });
+    state.currentPick++;
+    n++;
+  }
+  save();
+  render();
+  if (n) toast(isOver() ? `Se simularon ${n} picks. El draft terminó.` : `Se simularon ${n} picks. Te toca.`, !isOver());
+  else toast('Ya es tu turno: elige a tu jugador primero.');
+}
+
+/* ---------- Disponibilidad en tu siguiente pick ----------
+   Compara el lugar del jugador entre los disponibles con cuántos
+   picks hay antes de tu siguiente turno. */
+function availabilityMap() {
+  const map = new Map();
+  if (isOver()) return map;
+  const mine = teamOnClock(state.currentPick) === MY_TEAM;
+  const target = nextPickFor(MY_TEAM, state.currentPick + (mine ? 1 : 0));
+  if (!target) return map;
+  const before = target - state.currentPick; // picks que pasan antes de tu turno
+  const drafted = draftedMap();
+  PLAYERS.filter(p => !drafted.has(p.id) && p.pos !== 'K' && p.pos !== 'DST').forEach((p, idx) => {
+    if (idx < before * 0.7) map.set(p.id, 'gone');
+    else if (idx < before * 1.3) map.set(p.id, 'maybe');
+    else map.set(p.id, 'likely');
+  });
+  return map;
+}
+const AVAIL_TEXT = { gone: 'Se va', maybe: 'En duda', likely: 'Llega' };
+
+/* ---------- Exportar ---------- */
+function exportCSV() {
+  const slots = rosterFor(MY_TEAM);
+  const picks = new Map(state.log.filter(l => l.team === MY_TEAM).map(l => [l.playerId, l.pick]));
+  const rows = [['Slot', 'Jugador', 'Posicion', 'Equipo NFL', 'Bye', 'ADP', 'Pick']];
+  ROSTER_SLOTS.forEach(s => {
+    const p = slots[s.id];
+    rows.push(p ? [s.label, p.name, p.pos, p.team, p.bye || '', p.rank, picks.get(p.id)] : [s.label, '', '', '', '', '', '']);
+  });
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'mi-roster-2026.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Roster exportado');
 }
 
 /* ---------- Sugerencias ---------- */
@@ -137,6 +235,11 @@ function suggestions(limit = 5) {
   const byeLoad = {};
   Object.values(slots).forEach(p => { if (p && p.bye) byeLoad[p.bye] = (byeLoad[p.bye] || 0) + 1; });
   const round = roundOf(Math.min(state.currentPick, TOTAL_PICKS));
+  const roundsLeft = ROUNDS - round + 1;
+  const lateNeeds = needs.K + needs.DST;
+  const owned = pos => Object.values(slots).filter(p => p && p.pos === pos).length;
+  const supply = tierSupply();
+  const avail = availabilityMap();
 
   return PLAYERS
     .filter(p => !drafted.has(p.id))
@@ -147,6 +250,21 @@ function suggestions(limit = 5) {
       let why = 'Mejor valor disponible';
       if (need > 0) { score += 15 * need; why = `Llena tu ${p.pos} titular`; }
       else if (FLEX_POS.includes(p.pos) && !slots.FLEX) { score += 8; why = 'Candidato para tu FLEX'; }
+      const left = supply[p.pos]?.[p.tier] ?? 99;
+      if (left <= 2 && (need > 0 || FLEX_POS.includes(p.pos))) {
+        score += 10;
+        why += left === 1 ? `. Es el último de su tier` : `. Solo quedan ${left} de su tier`;
+      }
+      if (avail.get(p.id) === 'gone') score += 4; // no va a regresar a tu siguiente pick
+      // En liga de 1 QB y 1 TE, los suplentes valen poco
+      if (p.pos === 'QB' && owned('QB') >= 1) { score -= owned('QB') >= 2 ? 200 : 40; why = 'QB suplente'; }
+      if (p.pos === 'TE' && owned('TE') >= 1) { score -= owned('TE') >= 2 ? 200 : 25; why = 'TE suplente'; }
+      if ((p.pos === 'K' || p.pos === 'DST') && need === 0) score -= 300;
+      // Asegura K y DST antes de que se acaben las rondas
+      if ((p.pos === 'K' || p.pos === 'DST') && need > 0 && roundsLeft <= lateNeeds + 1) {
+        score += 300;
+        why = `Quedan ${roundsLeft} rondas: asegura tu ${p.pos}`;
+      }
       const clash = byeLoad[p.bye] || 0;
       if (clash >= 2) { score -= clash * 10; why += `, pero choca con ${clash} byes de semana ${p.bye}`; }
       return { p, score, why };
@@ -181,20 +299,48 @@ function renderScoreboard() {
     $('sbTeam').textContent = mine ? 'Te toca' : teamLabel(onClock);
     const next = nextPickFor(MY_TEAM, state.currentPick + (mine ? 1 : 0));
     const gap = next ? next - state.currentPick : null;
-    $('sbNext').textContent = next ? `#${next} (faltan ${gap})` : 'Ya no tienes picks';
+    $('sbNext').innerHTML = next ? `#${next} <small>en ${gap} ${gap === 1 ? 'pick' : 'picks'}</small>` : 'Ya no tienes picks';
     sb.classList.toggle('is-mine', mine);
   }
   $('undoBtn').disabled = state.log.length === 0;
 }
 
+/* Cuántos jugadores quedan disponibles por posición y tier */
+function tierSupply() {
+  const drafted = draftedMap();
+  const out = {};
+  PLAYERS.forEach(p => {
+    if (drafted.has(p.id)) return;
+    out[p.pos] = out[p.pos] || {};
+    out[p.pos][p.tier] = (out[p.pos][p.tier] || 0) + 1;
+  });
+  return out;
+}
+
+function renderSupply() {
+  const supply = tierSupply();
+  let html = '<thead><tr><th></th>' + [1, 2, 3, 4].map(t => `<th class="tier tier-${t}">T${t}</th>`).join('') + '</tr></thead><tbody>';
+  ['QB', 'RB', 'WR', 'TE'].forEach(pos => {
+    html += `<tr><th>${posTag(pos)}</th>`;
+    [1, 2, 3, 4].forEach(t => {
+      const n = supply[pos]?.[t] || 0;
+      const cls = n === 0 ? 'is-out' : n <= 2 ? 'is-low' : '';
+      html += `<td class="${cls}">${n}</td>`;
+    });
+    html += '</tr>';
+  });
+  $('supply').innerHTML = html + '</tbody>';
+}
+
 function renderPosFilter() {
   const wrap = $('posFilter');
-  const opts = ['ALL', ...POSITIONS];
+  const opts = ['ALL', ...POSITIONS, 'WATCH'];
   wrap.style.setProperty('--count', opts.length);
   wrap.innerHTML = '';
   opts.forEach(o => {
     const label = el('label');
-    label.innerHTML = `<input type="radio" name="pos" value="${o}" ${o === ui.pos ? 'checked' : ''}><span>${o === 'ALL' ? 'Todos' : o}</span>`;
+    const text = o === 'ALL' ? 'Todos' : o === 'WATCH' ? 'Mi lista' : o;
+    label.innerHTML = `<input type="radio" name="pos" value="${o}" ${o === ui.pos ? 'checked' : ''}><span>${text}</span>`;
     label.querySelector('input').addEventListener('change', () => { ui.pos = o; renderTable(); });
     wrap.appendChild(label);
   });
@@ -206,7 +352,7 @@ function filteredPlayers() {
   const hideTaken = $('hideTaken').checked;
   const drafted = draftedMap();
   return PLAYERS.filter(p =>
-    (ui.pos === 'ALL' || p.pos === ui.pos) &&
+    (ui.pos === 'ALL' || p.pos === ui.pos || (ui.pos === 'WATCH' && state.watch.includes(p.id))) &&
     (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase().includes(q)) &&
     (!hideTaken || !drafted.has(p.id))
   );
@@ -217,20 +363,29 @@ function renderTable() {
   const drafted = draftedMap();
   const rows = filteredPlayers();
   const mine = !isOver() && teamOnClock(state.currentPick) === MY_TEAM;
+  const avail = availabilityMap();
   body.innerHTML = '';
   $('emptyState').hidden = rows.length > 0;
+  $('emptyState').textContent = ui.pos === 'WATCH' && !state.watch.length
+    ? 'Tu lista está vacía. Toca la estrella de un jugador para seguirlo.'
+    : 'Nadie coincide con esa búsqueda. Prueba con otro nombre o cambia la posición.';
 
   const frag = document.createDocumentFragment();
   rows.forEach(p => {
     const d = drafted.get(p.id);
+    const watched = state.watch.includes(p.id);
+    const a = d ? null : avail.get(p.id);
     const tr = el('tr', d ? 'is-taken' : '');
     tr.innerHTML = `
+      <td class="c-star"><button class="star${watched ? ' is-on' : ''}" aria-pressed="${watched}" aria-label="${watched ? 'Quitar de' : 'Agregar a'} tu lista: ${p.name}">★</button></td>
       <td class="c-rank">${p.rank}</td>
       <td><div class="p-name">${p.name}</div><div class="p-sub">${p.team}${d ? `, elegido por ${teamLabel(d.team)} en el pick ${d.pick}` : ''}</div></td>
       <td>${posTag(p.pos)}</td>
       <td class="c-num">${p.bye || '–'}</td>
       <td><span class="tier tier-${p.tier}">Tier ${p.tier}</span></td>
+      <td class="c-avail">${a ? `<span class="avail avail-${a}">${AVAIL_TEXT[a]}</span>` : ''}</td>
       <td class="c-action"></td>`;
+    tr.querySelector('.star').addEventListener('click', () => toggleWatch(p.id));
     if (!d && !isOver()) {
       const btn = el('button', 'btn btn-small' + (mine ? ' btn-primary' : ''), mine ? 'Elegir' : 'Marcar');
       btn.title = mine ? 'Agregar a tu roster' : `Marcar como elegido por ${teamLabel(teamOnClock(state.currentPick))}`;
@@ -247,7 +402,8 @@ function renderRoster() {
   const list = $('myRoster');
   list.innerHTML = '';
   let benchMarked = false;
-  ROSTER_SLOTS.forEach(s => {
+  const extras = Object.keys(slots).filter(k => k.startsWith('EX')).map(id => ({ id, label: 'Extra', bench: true }));
+  [...ROSTER_SLOTS, ...extras].forEach(s => {
     const p = slots[s.id];
     const li = el('li');
     if (s.bench && !benchMarked) { li.classList.add('bench-start'); benchMarked = true; }
@@ -321,8 +477,10 @@ function render() {
   renderTable();
   renderRoster();
   renderSuggestions();
+  renderSupply();
   renderLog();
   if (ui.view === 'grid') renderGrid();
+  $('simBtn').disabled = isOver() || teamOnClock(state.currentPick) === MY_TEAM;
 }
 
 /* ---------- Avisos ---------- */
@@ -350,6 +508,8 @@ function bindEvents() {
   $('hideTaken').addEventListener('change', renderTable);
   $('undoBtn').addEventListener('click', undo);
   $('resetBtn').addEventListener('click', resetDraft);
+  $('simBtn').addEventListener('click', simulateToMyTurn);
+  $('exportBtn').addEventListener('click', exportCSV);
   document.querySelectorAll('.view-tab').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
 
   document.addEventListener('keydown', e => {
